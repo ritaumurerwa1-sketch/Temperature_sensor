@@ -1,0 +1,433 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>SPE Temperature Monitor</title>
+
+  <!-- Chart.js -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <!-- MQTT.js -->
+  <script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
+
+  <style>
+    /* ── Reset & base ── */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background: #1a1a2e;
+      color: #e0e0e0;
+      font-family: 'Segoe UI', Arial, sans-serif;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+    }
+
+    /* ── Connection status bar ── */
+    #status-bar {
+      width: 100%;
+      padding: 10px 20px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      background: #16213e;
+      border-bottom: 1px solid #0f3460;
+      font-size: 0.85rem;
+      letter-spacing: 0.03em;
+    }
+
+    #status-dot {
+      width: 12px;
+      height: 12px;
+      border-radius: 50%;
+      background: #e74c3c;        /* red by default */
+      flex-shrink: 0;
+      box-shadow: 0 0 6px #e74c3c;
+      transition: background 0.3s, box-shadow 0.3s;
+    }
+
+    #status-dot.connected {
+      background: #2ecc71;
+      box-shadow: 0 0 8px #2ecc71;
+    }
+
+    #status-text {
+      color: #a0a0b0;
+    }
+
+    /* ── Page title ── */
+    header {
+      margin: 32px 16px 8px;
+      text-align: center;
+    }
+
+    header h1 {
+      font-size: clamp(1.2rem, 3vw, 1.8rem);
+      color: #00d4ff;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+    }
+
+    header p {
+      margin-top: 4px;
+      font-size: 0.8rem;
+      color: #555577;
+      letter-spacing: 0.08em;
+    }
+
+    /* ── Main card wrapper ── */
+    main {
+      width: min(95%, 860px);
+      display: flex;
+      flex-direction: column;
+      gap: 20px;
+      padding: 20px 0 40px;
+    }
+
+    /* ── Current temperature ── */
+    .temp-card {
+      background: #16213e;
+      border: 1px solid #0f3460;
+      border-radius: 16px;
+      padding: 36px 20px;
+      text-align: center;
+    }
+
+    .temp-label {
+      font-size: 0.75rem;
+      letter-spacing: 0.15em;
+      text-transform: uppercase;
+      color: #555577;
+      margin-bottom: 8px;
+    }
+
+    #current-temp {
+      font-size: clamp(4rem, 15vw, 7rem);
+      font-weight: 700;
+      color: #00d4ff;
+      line-height: 1;
+      letter-spacing: -0.02em;
+      text-shadow: 0 0 30px rgba(0, 212, 255, 0.4);
+      transition: color 0.4s;
+    }
+
+    #current-temp.warn  { color: #f39c12; text-shadow: 0 0 30px rgba(243,156,18,0.4); }
+    #current-temp.hot   { color: #e74c3c; text-shadow: 0 0 30px rgba(231,76,60,0.4);  }
+
+    .temp-unit {
+      font-size: clamp(1.5rem, 4vw, 2.5rem);
+      color: #607080;
+      vertical-align: super;
+      margin-left: 4px;
+    }
+
+    #last-updated {
+      margin-top: 12px;
+      font-size: 0.75rem;
+      color: #444466;
+    }
+
+    /* ── Stats row ── */
+    .stats-row {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 12px;
+    }
+
+    .stat-card {
+      background: #16213e;
+      border: 1px solid #0f3460;
+      border-radius: 12px;
+      padding: 20px 12px;
+      text-align: center;
+    }
+
+    .stat-label {
+      font-size: 0.7rem;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: #555577;
+      margin-bottom: 8px;
+    }
+
+    .stat-value {
+      font-size: clamp(1.4rem, 4vw, 2rem);
+      font-weight: 600;
+      color: #00d4ff;
+    }
+
+    #stat-min  .stat-value { color: #3498db; }
+    #stat-max  .stat-value { color: #e74c3c; }
+    #stat-avg  .stat-value { color: #2ecc71; }
+
+    /* ── Chart card ── */
+    .chart-card {
+      background: #16213e;
+      border: 1px solid #0f3460;
+      border-radius: 16px;
+      padding: 24px 20px 20px;
+    }
+
+    .chart-title {
+      font-size: 0.72rem;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: #555577;
+      margin-bottom: 16px;
+    }
+
+    .chart-wrapper {
+      position: relative;
+      height: clamp(180px, 30vw, 260px);
+    }
+
+    /* ── Responsive ── */
+    @media (max-width: 480px) {
+      .stats-row { grid-template-columns: repeat(3, 1fr); gap: 8px; }
+      .stat-card  { padding: 14px 8px; }
+    }
+  </style>
+</head>
+<body>
+
+  <!-- ── Connection status bar ── -->
+  <div id="status-bar">
+    <div id="status-dot"></div>
+    <span id="status-text">Connecting to broker 157.173.101.159:9001 …</span>
+  </div>
+
+  <!-- ── Title ── -->
+  <header>
+    <h1>SPE Temperature Monitor — user273</h1>
+    <p>Trade Code: SPE &nbsp;|&nbsp; Topic: SPE/temperature/user273</p>
+  </header>
+
+  <!-- ── Main content ── -->
+  <main>
+
+    <!-- Current temperature -->
+    <div class="temp-card">
+      <div class="temp-label">Current Temperature</div>
+      <div>
+        <span id="current-temp">--.-</span><span class="temp-unit">°C</span>
+      </div>
+      <div id="last-updated">Waiting for data…</div>
+    </div>
+
+    <!-- Stats: Min | Max | Average -->
+    <div class="stats-row">
+      <div class="stat-card" id="stat-min">
+        <div class="stat-label">Min</div>
+        <div class="stat-value" id="val-min">--</div>
+      </div>
+      <div class="stat-card" id="stat-max">
+        <div class="stat-label">Max</div>
+        <div class="stat-value" id="val-max">--</div>
+      </div>
+      <div class="stat-card" id="stat-avg">
+        <div class="stat-label">Average</div>
+        <div class="stat-value" id="val-avg">--</div>
+      </div>
+    </div>
+
+    <!-- Live chart -->
+    <div class="chart-card">
+      <div class="chart-title">Last 20 Readings — Temperature (°C) over Time</div>
+      <div class="chart-wrapper">
+        <canvas id="tempChart"></canvas>
+      </div>
+    </div>
+
+  </main>
+
+  <script>
+    // ============================================================
+    // CONFIGURATION
+    // ============================================================
+    const BROKER_HOST  = '157.173.101.159';
+    const BROKER_WS    = 9001;
+    const MQTT_TOPIC   = 'SPE/temperature/user273';
+    const MAX_READINGS = 20;
+    const RECONNECT_MS = 5000;
+
+    // ============================================================
+    // STATE
+    // ============================================================
+    const readings      = [];   // { value: float, time: string }
+    let sessionMin      = null;
+    let sessionMax      = null;
+    let mqttClient      = null;
+
+    // ============================================================
+    // DOM REFERENCES
+    // ============================================================
+    const elDot         = document.getElementById('status-dot');
+    const elStatusText  = document.getElementById('status-text');
+    const elCurrentTemp = document.getElementById('current-temp');
+    const elLastUpdated = document.getElementById('last-updated');
+    const elMin         = document.getElementById('val-min');
+    const elMax         = document.getElementById('val-max');
+    const elAvg         = document.getElementById('val-avg');
+
+    // ============================================================
+    // CHART.JS SETUP
+    // ============================================================
+    const ctx = document.getElementById('tempChart').getContext('2d');
+
+    const tempChart = new Chart(ctx, {
+      type: 'line',
+      data: {
+        labels: [],                // time strings on X axis
+        datasets: [{
+          label: 'Temperature (°C)',
+          data: [],                // float values on Y axis
+          borderColor:      '#00d4ff',
+          backgroundColor:  'rgba(0, 212, 255, 0.08)',
+          pointBackgroundColor: '#00d4ff',
+          pointRadius: 4,
+          pointHoverRadius: 6,
+          borderWidth: 2,
+          tension: 0.35,
+          fill: true,
+        }]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        animation: { duration: 300 },
+        scales: {
+          x: {
+            ticks: {
+              color: '#556070',
+              maxRotation: 45,
+              font: { size: 10 }
+            },
+            grid: { color: 'rgba(255,255,255,0.05)' }
+          },
+          y: {
+            ticks: { color: '#556070', font: { size: 11 } },
+            grid:  { color: 'rgba(255,255,255,0.05)' },
+            title: {
+              display: true,
+              text: '°C',
+              color: '#556070',
+              font: { size: 11 }
+            }
+          }
+        },
+        plugins: {
+          legend: { labels: { color: '#a0a0b0', font: { size: 11 } } },
+          tooltip: {
+            callbacks: {
+              label: ctx => ` ${ctx.parsed.y.toFixed(1)} °C`
+            }
+          }
+        }
+      }
+    });
+
+    // ============================================================
+    // HELPERS
+    // ============================================================
+    function nowString() {
+      const d = new Date();
+      return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    }
+
+    function setConnected(isConnected) {
+      if (isConnected) {
+        elDot.classList.add('connected');
+        elStatusText.textContent = `Connected to broker ${BROKER_HOST}:${BROKER_WS}`;
+      } else {
+        elDot.classList.remove('connected');
+        elStatusText.textContent = 'Disconnected — retrying in 5 s…';
+      }
+    }
+
+    function updateTempColor(val) {
+      elCurrentTemp.classList.remove('warn', 'hot');
+      if (val >= 35)      elCurrentTemp.classList.add('hot');
+      else if (val >= 30) elCurrentTemp.classList.add('warn');
+    }
+
+    function updateDashboard(value) {
+      const timeStr = nowString();
+
+      // Large current reading
+      elCurrentTemp.textContent = value.toFixed(1);
+      updateTempColor(value);
+      elLastUpdated.textContent = `Last updated: ${timeStr}`;
+
+      // Session min / max
+      if (sessionMin === null || value < sessionMin) sessionMin = value;
+      if (sessionMax === null || value > sessionMax) sessionMax = value;
+
+      // Rolling readings array (max 20)
+      readings.push({ value, time: timeStr });
+      if (readings.length > MAX_READINGS) readings.shift();
+
+      // Stats
+      const sum = readings.reduce((a, r) => a + r.value, 0);
+      const avg = sum / readings.length;
+
+      elMin.textContent = sessionMin.toFixed(1) + ' °C';
+      elMax.textContent = sessionMax.toFixed(1) + ' °C';
+      elAvg.textContent = avg.toFixed(1) + ' °C';
+
+      // Chart update
+      tempChart.data.labels   = readings.map(r => r.time);
+      tempChart.data.datasets[0].data = readings.map(r => r.value);
+      tempChart.update();
+    }
+
+    // ============================================================
+    // MQTT CONNECTION
+    // ============================================================
+    function connect() {
+      const clientId = 'spe_dashboard_' + Math.random().toString(16).slice(2, 8);
+      const url      = `ws://${BROKER_HOST}:${BROKER_WS}/mqtt`;
+
+      mqttClient = mqtt.connect(url, {
+        clientId,
+        clean:         true,
+        reconnectPeriod: RECONNECT_MS,   // MQTT.js handles auto-reconnect
+        connectTimeout: 10000,
+      });
+
+      mqttClient.on('connect', () => {
+        setConnected(true);
+        mqttClient.subscribe(MQTT_TOPIC, { qos: 1 }, (err) => {
+          if (err) {
+            elStatusText.textContent = `Subscribed failed: ${err.message}`;
+          }
+        });
+      });
+
+      mqttClient.on('message', (topic, message) => {
+        if (topic !== MQTT_TOPIC) return;
+        const raw = message.toString().trim();
+        const val = parseFloat(raw);
+        if (!isNaN(val)) {
+          updateDashboard(val);
+        }
+      });
+
+      mqttClient.on('reconnect', () => {
+        setConnected(false);
+        elStatusText.textContent = 'Reconnecting to broker…';
+      });
+
+      mqttClient.on('offline', ()  => setConnected(false));
+      mqttClient.on('error',   (e) => {
+        setConnected(false);
+        console.error('MQTT error:', e);
+      });
+      mqttClient.on('close',   ()  => setConnected(false));
+    }
+
+    // ── Start ──
+    connect();
+  </script>
+</body>
+</html>
